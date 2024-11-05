@@ -9,15 +9,40 @@ class Program
 
         if (input == "1")
         {
+            Console.Write("Enter port to listen on (default 8007): ");
+            string portInput = Console.ReadLine();
+            int port = string.IsNullOrEmpty(portInput) ? 8007 : int.Parse(portInput);
+
             Console.WriteLine("Starting server...");
-            await SimpleServer.RunServerAsync();
+            var server = new SimpleServer();
+            await server.RunServerAsync(port);
         }
         else if (input == "2")
         {
-            Console.WriteLine("Enter the message to send:");
-            string message = Console.ReadLine();
+            Console.Write("Enter server IP (default 127.0.0.1): ");
+            string ip = Console.ReadLine();
+            ip = string.IsNullOrEmpty(ip) ? "127.0.0.1" : ip;
+
+            Console.Write("Enter server port (default 8007): ");
+            string portInput = Console.ReadLine();
+            int port = string.IsNullOrEmpty(portInput) ? 8007 : int.Parse(portInput);
+
             Console.WriteLine("Starting client...");
-            await SimpleClient.RunClientAsync(message);
+            var client = new SimpleClient();
+            await client.ConnectAsync(ip, port);
+
+            // Start message loop
+            while (true)
+            {
+                Console.Write("Enter message (or 'exit' to quit): ");
+                string message = Console.ReadLine();
+                if (message?.ToLower() == "exit")
+                    break;
+
+                await client.SendMessageAsync(message);
+            }
+
+            await client.DisconnectAsync();
         }
         else
         {

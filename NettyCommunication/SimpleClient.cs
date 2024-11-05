@@ -1,60 +1,95 @@
-namespace NettyCommunication;
-
 using DotNetty.Buffers;
 using DotNetty.Transport.Bootstrapping;
 using DotNetty.Transport.Channels;
 using DotNetty.Transport.Channels.Sockets;
-using System;
+using System.Net;
 using System.Text;
-using System.Threading.Tasks;
 
-public class SimpleClient
+namespace NettyCommunication
 {
-    private const string Host = "127.0.0.1";
-    private const int Port = 8007;
-
-    public static async Task RunClientAsync(string message)
+    public class SimpleClient
     {
-        var group = new MultithreadEventLoopGroup();
+        private IChannel clientChannel;
+        private IEventLoopGroup group;
 
-        try
+        public async Task ConnectAsync(string host, int port)
         {
-            var bootstrap = new Bootstrap();
-            bootstrap.Group(group)
-                .Channel<TcpSocketChannel>()
-                .Handler(new ActionChannelInitializer<ISocketChannel>(channel =>
-                {
-                    IChannelPipeline pipeline = channel.Pipeline;
-                    pipeline.AddLast(new SimpleClientHandler());
-                }));
+            group = new MultithreadEventLoopGroup();
 
-            IChannel clientChannel = await bootstrap.ConnectAsync(Host, Port);
+            try
+            {
+                var bootstrap = new Bootstrap();
+                bootstrap
+                    .Group(group)
+                    .Channel<TcpSocketChannel>()
+                    .Option(ChannelOption.TcpNodelay, true)
+                    .Handler(new ActionChannelInitializer<ISocketChannel>(channel =>
+                    {
+                        IChannelPipeline pipeline = channel.Pipeline;
+                        pipeline.AddLast(new BaseClientHandler());
+                    }));
 
-            // Send a message to the server
-            var initialMessage = Unpooled.WrappedBuffer(Encoding.UTF8.GetBytes(message));
-            await clientChannel.WriteAndFlushAsync(initialMessage);
-
-            // Wait until the connection is closed
-            await clientChannel.CloseCompletion;
+                var endpoint = new IPEndPoint(IPAddress.Parse(host), port);
+                Console.WriteLine($"Connecting to {endpoint}...");
+                clientChannel = await bootstrap.ConnectAsync(endpoint);
+                Console.WriteLine("Connected successfully!");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Connection failed: {ex.Message}");
+                await DisconnectAsync();
+                throw;
+            }
         }
-        finally
+
+        public async Task SendMessageAsync(string message)
         {
-            await group.ShutdownGracefullyAsync();
+            if (clientChannel?.Active != true)
+            {
+                throw new InvalidOperationException("Client is not connected");
+            }
+
+            try
+            {
+                var buffer = Unpooled.Buffer();
+                buffer.WriteBytes(Encoding.UTF8.GetBytes(message));
+                await clientChannel.WriteAndFlushAsync(buffer);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed to send message: {ex.Message}");
+                throw;
+            }
+        }
+
+        public async Task DisconnectAsync()
+        {
+            if (clientChannel != null)
+            {
+                await clientChannel.CloseAsync();
+            }
+
+            if (group != null)
+            {
+                await group.ShutdownGracefullyAsync(TimeSpan.FromMilliseconds(100), TimeSpan.FromSeconds(1));
+            }
         }
     }
 }
 
-public class SimpleClientHandler : SimpleChannelInboundHandler<IByteBuffer>
+public class BaseClientHandler : SimpleChannelInboundHandler<IByteBuffer>
 {
     protected override void ChannelRead0(IChannelHandlerContext ctx, IByteBuffer msg)
     {
         string received = msg.ToString(Encoding.UTF8);
-        Console.WriteLine($"Client received: {received}");
+        Console.WriteLine($"\nReceived: {received}");
+        Console.Write("Enter message (or 'exit' to quit): "); // Restore the prompt
     }
 
     public override void ExceptionCaught(IChannelHandlerContext ctx, Exception e)
     {
-        Console.WriteLine($"Client caught exception: {e}");
+        Console.WriteLine($"\nError: {e.Message}");
+        Console.Write("Enter message (or 'exit' to quit): "); // Restore the prompt
         ctx.CloseAsync();
     }
 }

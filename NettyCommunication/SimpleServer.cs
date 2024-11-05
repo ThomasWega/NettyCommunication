@@ -8,71 +8,100 @@ using System;
 using System.Net;
 using System.Text;
 using System.Threading.Tasks;
+using DotNetty.Transport.Channels.Groups;
+
 
 public class SimpleServer
 {
-    private const int Port = 8007;
+    private IChannel boundChannel;
+    private IEventLoopGroup bossGroup;
+    private IEventLoopGroup workerGroup;
 
-    public static async Task RunServerAsync()
+    public async Task RunServerAsync(int port)
     {
-        var bossGroup = new MultithreadEventLoopGroup(1);
-        var workerGroup = new MultithreadEventLoopGroup();
+        bossGroup = new MultithreadEventLoopGroup(1);
+        workerGroup = new MultithreadEventLoopGroup();
 
         try
         {
             var bootstrap = new ServerBootstrap();
             bootstrap.Group(bossGroup, workerGroup)
-                     .Channel<TcpServerSocketChannel>()
-                     .Option(ChannelOption.SoBacklog, 100)
-                     .ChildHandler(new ActionChannelInitializer<IChannel>(channel =>
-                     {
-                         IChannelPipeline pipeline = channel.Pipeline;
-                         pipeline.AddLast(new SimpleServerHandler());
-                     }));
+                .Channel<TcpServerSocketChannel>()
+                .Option(ChannelOption.SoBacklog, 100)
+                .ChildHandler(new ActionChannelInitializer<IChannel>(channel =>
+                {
+                    IChannelPipeline pipeline = channel.Pipeline;
+                    pipeline.AddLast(new BaseServerHandler());
+                }));
 
-            // Bind the server to an IP address
-            var localIpAddress = GetLocalIpAddress();
-            IChannel boundChannel = await bootstrap.BindAsync(new IPEndPoint(localIpAddress, Port));
+            var endpoint = new IPEndPoint(IPAddress.Parse("0.0.0.0"), port);
+            boundChannel = await bootstrap.BindAsync(endpoint);
 
-            Console.WriteLine($"Server started on IP {localIpAddress} and port {Port}");
-            await boundChannel.CloseCompletion;
+            Console.WriteLine($"Server started on port {port}");
+            Console.WriteLine("Press Enter to stop the server...");
+            await Task.Run(() => Console.ReadLine());
         }
         finally
         {
-            await Task.WhenAll(bossGroup.ShutdownGracefullyAsync(), workerGroup.ShutdownGracefullyAsync());
+            await ShutdownAsync();
         }
     }
 
-    // Helper method to get the local IP address
-    private static IPAddress GetLocalIpAddress()
+    public async Task ShutdownAsync()
     {
-        var host = Dns.GetHostEntry(Dns.GetHostName());
-        foreach (var ip in host.AddressList)
+        if (boundChannel != null)
+            await boundChannel.CloseAsync();
+
+        if (bossGroup != null && workerGroup != null)
         {
-            if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
-            {
-                return ip;
-            }
+            await Task.WhenAll(
+                bossGroup.ShutdownGracefullyAsync(TimeSpan.FromMilliseconds(100), TimeSpan.FromSeconds(1)),
+                workerGroup.ShutdownGracefullyAsync(TimeSpan.FromMilliseconds(100), TimeSpan.FromSeconds(1))
+            );
         }
-        throw new Exception("No network adapters with an IPv4 address in the system!");
     }
 }
 
-public class SimpleServerHandler : SimpleChannelInboundHandler<IByteBuffer>
+public class BaseServerHandler : SimpleChannelInboundHandler<IByteBuffer>
 {
+    // FIXME: figure out channel grouping
+    private static readonly IChannelGroup Channels = new DefaultChannelGroup();
+
+    public override void ChannelActive(IChannelHandlerContext context)
+    {
+        var channel = context.Channel;
+        Channels.Add(channel);
+        Console.WriteLine($"Client connected: {channel.RemoteAddress}");
+    }
+
+    public override void ChannelInactive(IChannelHandlerContext context)
+    {
+        var channel = context.Channel;
+        Channels.Remove(channel);
+        Console.WriteLine($"Client disconnected: {channel.RemoteAddress}");
+    }
+
     protected override void ChannelRead0(IChannelHandlerContext ctx, IByteBuffer msg)
     {
         string received = msg.ToString(Encoding.UTF8);
-        Console.WriteLine($"Server received: {received}");
+        Console.WriteLine($"Server received from {ctx.Channel.RemoteAddress}: {received}");
 
-        // Send the message back to the client (echo)
-        var buffer = Unpooled.WrappedBuffer(Encoding.UTF8.GetBytes($"Server Echo: {received}"));
-        ctx.WriteAndFlushAsync(buffer);
+        // Broadcast the message to all connected clients
+        var buffer = Unpooled.WrappedBuffer(Encoding.UTF8.GetBytes($"[{ctx.Channel.RemoteAddress}]: {received}"));
+        foreach (var channel in Channels)
+        {
+            if (channel != ctx.Channel) // Don't send back to sender
+            {
+                channel.WriteAndFlushAsync(buffer.RetainedDuplicate());
+            }
+        }
+
+        buffer.Release();
     }
 
     public override void ExceptionCaught(IChannelHandlerContext ctx, Exception e)
     {
-        Console.WriteLine($"Server caught exception: {e}");
+        Console.WriteLine($"Server caught exception from {ctx.Channel.RemoteAddress}: {e}");
         ctx.CloseAsync();
     }
 }
